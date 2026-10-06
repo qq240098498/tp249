@@ -1,6 +1,7 @@
 const { AppError } = require('./errors');
 const store = require('./store');
 const coldlib = require('./coldlib');
+const docs = require('./docs');
 
 const ROOM_STATUS = ['运行', '检修', '停用'];
 const ROOM_TYPE = ['冷藏库', '冷藏车', '冷冻库'];
@@ -212,6 +213,7 @@ function batchDetail(data, id) {
     segments: coldlib.excursionStats(data, id).segments,
     chainGaps: coldlib.chainGaps(data, id).gaps,
     releases: data.releases.filter((r) => r.batchId === id).slice().sort((a, b) => (a.decidedAt < b.decidedAt ? 1 : -1)),
+    releaseDocs: docs.listDocs(data, { batchId: id }),
   });
 }
 
@@ -268,6 +270,12 @@ function removeBatch(data, id) {
   const batch = data.batches.find((b) => b.id === id);
   if (!batch) throw new AppError(404, 'BATCH_NOT_FOUND', '这个批次不存在');
   if (batch.status === '已放行') throw new AppError(409, 'BATCH_RELEASED', '这个批次已经放行，不能直接删除', { code: batch.code });
+  const activeDocs = data.releaseDocs.filter((d) => d.batchId === id && d.status !== '已撤销');
+  if (activeDocs.length) {
+    throw new AppError(409, 'BATCH_HAS_DOCS',
+      '这个批次名下还有有效放行单 ' + activeDocs.map((d) => d.docNo).join('、') + '，先撤销单据再删除',
+      { count: activeDocs.length });
+  }
   const used = data.records.filter((r) => r.batchId === id).length;
   data.records = data.records.filter((r) => r.batchId !== id);
   data.releases = data.releases.filter((r) => r.batchId !== id);
@@ -333,9 +341,10 @@ function listReleases(data, query) {
   let rows = data.releases.slice();
   if (q.batchId) rows = rows.filter((r) => r.batchId === q.batchId);
   if (q.decision) rows = rows.filter((r) => r.decision === q.decision);
-  return rows
-    .map((r) => Object.assign({}, r, { batchCode: batchCode(data, r.batchId) }))
-    .sort((a, b) => (a.decidedAt < b.decidedAt ? 1 : -1));
+  let decorated = rows.map((r) => docs.decorateReleaseRow(data, r));
+  if (q.docStatus) decorated = decorated.filter((r) => r.docStatus === q.docStatus);
+  if (q.receiptStatus) decorated = decorated.filter((r) => r.receiptStatus === q.receiptStatus);
+  return decorated.sort((a, b) => (a.decidedAt < b.decidedAt ? 1 : -1));
 }
 
 // 放行：登记放行单并改批次状态

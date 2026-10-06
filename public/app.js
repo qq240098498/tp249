@@ -20,17 +20,20 @@ const state = {
   batchesView: [],
   recordsView: [],
   releasesView: [],
+  docsView: [],
   roomDetail: {},
   batchDetail: {},
   batchOut: {},
   batchDetailError: {},
   expandedRooms: new Set(),
   expandedBatches: new Set(),
+  expandedDocs: new Set(),
   filters: {
     rooms: { status: '', type: '', keyword: '', probeStatus: '', probeCal: 'all' },
     batches: { status: '', roomId: '', product: '', noRecord: false },
     records: { batchId: '', probeId: '', source: '', from: '', to: '' },
-    releases: { decision: '' }
+    releases: { decision: '', docStatus: '', receiptStatus: '' },
+    docs: { status: '', receiptStatus: '', reconcile: '', keyword: '' }
   }
 };
 
@@ -184,6 +187,7 @@ async function loadView(view) {
     else if (view === 'batches') await loadBatchesView();
     else if (view === 'records') await loadRecordsView();
     else if (view === 'releases') await loadReleasesView();
+    else if (view === 'docs') await loadDocsView();
   } catch (err) { showError(err); }
 }
 
@@ -212,6 +216,7 @@ function renderOverview() {
     { title: '在办批次', value: s.openBatchCount, sub: '在库与待放行', go: { view: 'batches' } },
     { title: '温度记录', value: s.recordCount, sub: '人工 ' + s.manualRecordCount, go: { view: 'records' } },
     { title: '放行 / 拒收', value: s.releasedCount + ' / ' + s.rejectedCount, sub: '台账 ' + s.releaseCount + ' 条', go: { view: 'releases' } },
+    { title: '放行单', value: s.releaseDocCount, sub: '待回执 ' + num(s.pendingReceiptCount) + ' · 对不上 ' + num(s.docMismatchCount), go: { view: 'docs' } },
     { title: '满足放行条件', value: s.readyToRelease, sub: '被挡下 ' + s.blockedCount, go: { view: 'batches' } },
     { title: '没有温度记录', value: s.noRecordBatches, sub: '个批次', go: { view: 'batches', noRecord: true } },
     { title: 'MKT', value: s.maxMkt, sub: '平均 ' + s.averageMkt, go: { view: 'batches' } }
@@ -441,6 +446,13 @@ function batchDetailRow(b) {
       '<td class="num">' + num(r.mkt) + '</td><td>' + esc(r.basis) + '</td></tr>';
   }).join('') || '<tr><td colspan="5" class="empty">没有放行记录</td></tr>';
 
+  const docsRows = (d.releaseDocs || []).map(function (doc) {
+    return '<tr><td>' + esc(doc.docNo) + '</td><td>' + docStatusPill(doc.status) + '</td>' +
+      '<td>' + esc(doc.issuedAt) + '</td><td>' + esc(doc.sentAt || '—') + '</td>' +
+      '<td>' + esc(doc.sentTo || '—') + '</td><td>' + receiptStatusPill(doc.receiptStatus) + '</td>' +
+      '<td>' + reconcilePill(doc.reconcile) + '</td></tr>';
+  }).join('') || '<tr><td colspan="7" class="empty">没有放行单</td></tr>';
+
   const decisionBtns = '<div class="detail-actions">' +
     '<button type="button" class="btn btn-primary" data-action="batch-release" data-id="' + esc(b.id) + '">放行</button>' +
     '<button type="button" class="btn" data-action="batch-reject" data-id="' + esc(b.id) + '">拒收</button>' +
@@ -459,6 +471,8 @@ function batchDetailRow(b) {
     '<table class="mini-table"><thead><tr><th>探头</th><th>校准有效期</th><th>记录时刻</th></tr></thead><tbody>' + expiredProbes + '</tbody></table></div>' +
     '<div class="detail-block"><h4>放行记录（' + (d.releases || []).length + '）</h4>' +
     '<table class="mini-table"><thead><tr><th>决定</th><th>时刻</th><th>经办人</th><th class="num">MKT</th><th>依据</th></tr></thead><tbody>' + releases + '</tbody></table>' +
+    '<h4>放行单（' + (d.releaseDocs || []).length + '）</h4>' +
+    '<table class="mini-table"><thead><tr><th>单号</th><th>状态</th><th>出具</th><th>发出</th><th>接收方</th><th>回执</th><th>对账</th></tr></thead><tbody>' + docsRows + '</tbody></table>' +
     decisionBtns + '</div>' +
     '</div></td></tr>';
 }
@@ -554,15 +568,49 @@ function toApiTime(v) {
 
 /* ---------- 放行台账 ---------- */
 
+function docStatusPill(status) {
+  if (status === '已发出') return pill('已发出', 'pill-ok');
+  if (status === '已撤销') return pill('已撤销', 'pill-bad');
+  return pill(status, 'pill-mute');
+}
+
+function receiptStatusPill(status) {
+  if (status === '已回执') return pill('已回执', 'pill-ok');
+  if (status === '对方拒收') return pill('对方拒收', 'pill-bad');
+  return pill(status, 'pill-mute');
+}
+
+/* 台账行的「单据」格：有有效单显示状态与单号，撤销过的给重新出具，没出过的放行记录给出单入口 */
+function releaseDocCell(r) {
+  if (num(r.validDocCount) > 0) {
+    return docStatusPill(r.docStatus) + ' <button type="button" class="link-btn" data-action="goto-doc" data-no="' + esc(r.docNo) + '">' + esc(r.docNo) + '</button>';
+  }
+  if (num(r.voidedDocCount) > 0) {
+    return pill('已撤销', 'pill-bad') + (r.decision === '放行'
+      ? ' <button type="button" class="btn btn-sm" data-action="doc-issue" data-id="' + esc(r.id) + '" data-code="' + esc(r.batchCode) + '">重新出具</button>' : '');
+  }
+  if (r.decision === '放行') {
+    return '<button type="button" class="btn btn-sm" data-action="doc-issue" data-id="' + esc(r.id) + '" data-code="' + esc(r.batchCode) + '">出单</button>';
+  }
+  return '—';
+}
+
+function releaseReceiptCell(r) {
+  if (num(r.validDocCount) === 0 || !r.receiptStatus) return '—';
+  return receiptStatusPill(r.receiptStatus);
+}
+
 async function loadReleasesView() {
   const f = state.filters.releases;
   const params = new URLSearchParams();
   if (f.decision) params.set('decision', f.decision);
+  if (f.docStatus) params.set('docStatus', f.docStatus);
+  if (f.receiptStatus) params.set('receiptStatus', f.receiptStatus);
   const rows = await api('GET', '/api/releases' + (params.toString() ? '?' + params.toString() : ''));
   state.releasesView = rows;
   const s = state.summary;
   if (s) {
-    $('releasesNote').textContent = '放行 ' + num(s.releasedCount) + ' 条，拒收 ' + num(s.rejectedCount) + ' 条';
+    $('releasesNote').textContent = '放行 ' + num(s.releasedCount) + ' 条，拒收 ' + num(s.rejectedCount) + ' 条 · 单据 ' + num(s.validDocCount) + ' 张（待回执 ' + num(s.pendingReceiptCount) + ' · 已回执 ' + num(s.receivedDocCount) + ' · 对不上 ' + num(s.docMismatchCount) + '）';
   } else {
     const rel = rows.filter(function (r) { return r.decision === '放行'; }).length;
     const rej = rows.filter(function (r) { return r.decision === '拒收'; }).length;
@@ -570,7 +618,7 @@ async function loadReleasesView() {
   }
   const tbody = $('releaseRows');
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="10" class="empty">没有符合条件的放行记录</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" class="empty">没有符合条件的放行记录</td></tr>';
     return;
   }
   tbody.innerHTML = rows.map(function (r) {
@@ -583,10 +631,115 @@ async function loadReleasesView() {
       '<td class="num">' + num(r.longestExcursionMinutes) + '</td>' +
       '<td class="num">' + num(r.totalExcursionMinutes) + '</td>' +
       '<td class="num">' + num(r.chainGapCount) + '</td>' +
+      '<td>' + releaseDocCell(r) + '</td>' +
+      '<td>' + releaseReceiptCell(r) + '</td>' +
       '<td>' + esc(r.basis) + '</td>' +
       '<td>' + esc(r.remark) + '</td>' +
       '</tr>';
   }).join('');
+}
+
+/* ---------- 放行单 ---------- */
+
+function reconcilePill(rec) {
+  if (!rec || rec.skipped) return '—';
+  if (rec.ok) return pill('一致', 'pill-ok');
+  return pill('偏 ' + (rec.diffs.length + rec.problems.length) + ' 处', 'pill-bad');
+}
+
+async function loadDocsView() {
+  const f = state.filters.docs;
+  const params = new URLSearchParams();
+  if (f.status) params.set('status', f.status);
+  if (f.receiptStatus) params.set('receiptStatus', f.receiptStatus);
+  if (f.reconcile) params.set('reconcile', f.reconcile);
+  if (f.keyword) params.set('keyword', f.keyword);
+  const rows = await api('GET', '/api/release-docs' + (params.toString() ? '?' + params.toString() : ''));
+  state.docsView = rows;
+  const s = state.summary;
+  if (s) {
+    $('docsNote').textContent = '共 ' + num(s.releaseDocCount) + ' 张 · 有效 ' + num(s.validDocCount) + ' 张（已出具 ' + num(s.issuedDocCount) + ' · 已发出 ' + num(s.sentDocCount) + '）· 待回执 ' + num(s.pendingReceiptCount) + ' · 已回执 ' + num(s.receivedDocCount) + ' · 已撤销 ' + num(s.voidedDocCount) + ' · 对不上 ' + num(s.docMismatchCount);
+  } else {
+    $('docsNote').textContent = '共 ' + rows.length + ' 张';
+  }
+  renderDocRows();
+}
+
+function renderDocRows() {
+  const rows = state.docsView || [];
+  const tbody = $('docRows');
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="11" class="empty">没有符合条件的放行单</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(function (d) {
+    const main = '<tr class="row-main" data-rowkind="doc" data-id="' + esc(d.id) + '">' +
+      '<td>' + esc(d.docNo) + '</td>' +
+      '<td>' + esc(d.batchCode) + '</td>' +
+      '<td>' + esc(d.product) + '</td>' +
+      '<td>' + docStatusPill(d.status) + '</td>' +
+      '<td>' + esc(d.issuedAt) + '</td>' +
+      '<td>' + esc(d.issuedBy) + '</td>' +
+      '<td>' + esc(d.sentAt || '—') + '</td>' +
+      '<td>' + esc(d.sentTo || '—') + '</td>' +
+      '<td>' + receiptStatusPill(d.receiptStatus) + '</td>' +
+      '<td>' + esc(d.receiptAt || '—') + '</td>' +
+      '<td>' + reconcilePill(d.reconcile) + '</td>' +
+      '</tr>';
+    if (!state.expandedDocs.has(d.id)) return main;
+    return main + docDetailRow(d);
+  }).join('');
+}
+
+function docDetailRow(d) {
+  const rec = d.reconcile || { diffs: [], problems: [] };
+  let reconHtml;
+  if (rec.skipped) {
+    reconHtml = '<div class="detail-note">已撤销的单不参与对账。</div>';
+  } else if (rec.ok) {
+    reconHtml = '<div class="detail-note">' + pill('一致', 'pill-ok') + ' 单据上的数字与台账同一条放行记录逐项一致。</div>';
+  } else {
+    const diffRows = (rec.diffs || []).map(function (f) {
+      return '<tr class="row-danger"><td>' + esc(f.label) + '</td><td>' + esc(f.docValue) + '</td><td>' + esc(f.ledgerValue) + '</td></tr>';
+    }).join('');
+    reconHtml = (diffRows
+      ? '<table class="mini-table"><thead><tr><th>偏在哪</th><th>单据上</th><th>台账里</th></tr></thead><tbody>' + diffRows + '</tbody></table>' : '') +
+      (rec.problems || []).map(function (p) { return '<div class="detail-note">' + pill('问题', 'pill-bad') + ' ' + esc(p) + '</div>'; }).join('');
+  }
+
+  const snapRows = [
+    ['批次', d.batchCode], ['品名', d.product], ['规格', d.spec], ['件数', d.units],
+    ['决定时刻', d.decidedAt], ['经办人', d.decider], ['当时的 MKT', d.mkt],
+    ['最长超限（分）', d.longestExcursionMinutes], ['累计超限（分）', d.totalExcursionMinutes],
+    ['断链数', d.chainGapCount], ['判定依据', d.basis], ['备注', d.remark]
+  ].map(function (kv) {
+    return '<tr><td>' + esc(kv[0]) + '</td><td>' + esc(kv[1]) + '</td></tr>';
+  }).join('');
+
+  const flowRows = [
+    ['出具', d.issuedAt, d.issuedBy, '单号 ' + d.docNo],
+    ['发出', d.sentAt || '—', d.sentTo || '—', d.sentAt ? '' : '未登记'],
+    ['回执', d.receiptAt || '—', '', d.receiptStatus],
+    ['撤销', d.voidedAt || '—', d.voidedBy || '—', d.voidReason || '']
+  ].map(function (kv) {
+    return '<tr><td>' + esc(kv[0]) + '</td><td>' + esc(kv[1]) + '</td><td>' + esc(kv[2]) + '</td><td>' + esc(kv[3]) + '</td></tr>';
+  }).join('');
+
+  const actions = '<div class="detail-actions">' +
+    (d.status === '已出具' ? '<button type="button" class="btn btn-primary" data-action="doc-send" data-id="' + esc(d.id) + '">登记发出</button>' : '') +
+    (d.status === '已发出' ? '<button type="button" class="btn btn-primary" data-action="doc-receipt" data-id="' + esc(d.id) + '">登记回执</button>' : '') +
+    (d.status !== '已撤销'
+      ? '<button type="button" class="btn btn-danger" data-action="doc-void" data-id="' + esc(d.id) + '">撤销</button>'
+      : '<span class="detail-note">已撤销留痕；需要新单请回放行台账，在这条放行记录上重新出具</span>') +
+    '</div>';
+
+  return '<tr class="row-detail"><td colspan="11"><div class="detail-grid">' +
+    '<div class="detail-block"><h4>单据内容（出具时快照）</h4>' +
+    '<table class="mini-table"><tbody>' + snapRows + '</tbody></table></div>' +
+    '<div class="detail-block"><h4>流转记录</h4>' +
+    '<table class="mini-table"><thead><tr><th>环节</th><th>时刻</th><th>人/对象</th><th>说明</th></tr></thead><tbody>' + flowRows + '</tbody></table>' +
+    '<h4>对账结果</h4>' + reconHtml + actions + '</div>' +
+    '</div></td></tr>';
 }
 
 /* ---------- 左侧筛选栏 ---------- */
@@ -639,7 +792,17 @@ function renderFilters() {
   } else if (v === 'releases') {
     const f = state.filters.releases;
     html = '<h3>台账筛选</h3>' +
-      '<div class="filter-field"><label>决定</label>' + selectHtml('decision', [{ value: '', label: '全部' }, { value: '放行', label: '放行' }, { value: '拒收', label: '拒收' }], f.decision) + '</div>';
+      '<div class="filter-field"><label>决定</label>' + selectHtml('decision', [{ value: '', label: '全部' }, { value: '放行', label: '放行' }, { value: '拒收', label: '拒收' }], f.decision) + '</div>' +
+      '<div class="filter-field"><label>单据状态</label>' + selectHtml('docStatus', [{ value: '', label: '全部' }, { value: '无单', label: '无单' }, { value: '已出具', label: '已出具' }, { value: '已发出', label: '已发出' }], f.docStatus) + '</div>' +
+      '<div class="filter-field"><label>回执状态</label>' + selectHtml('receiptStatus', [{ value: '', label: '全部' }, { value: '未发出', label: '未发出' }, { value: '待回执', label: '待回执' }, { value: '已回执', label: '已回执' }, { value: '对方拒收', label: '对方拒收' }], f.receiptStatus) + '</div>';
+  } else if (v === 'docs') {
+    const f = state.filters.docs;
+    html = '<h3>放行单筛选</h3>' +
+      '<div class="filter-field"><label>状态</label>' + selectHtml('status', [{ value: '', label: '全部' }, { value: '已出具', label: '已出具' }, { value: '已发出', label: '已发出' }, { value: '已撤销', label: '已撤销' }], f.status) + '</div>' +
+      '<div class="filter-field"><label>回执</label>' + selectHtml('receiptStatus', [{ value: '', label: '全部' }, { value: '未发出', label: '未发出' }, { value: '待回执', label: '待回执' }, { value: '已回执', label: '已回执' }, { value: '对方拒收', label: '对方拒收' }], f.receiptStatus) + '</div>' +
+      '<div class="filter-field"><label>对账</label>' + selectHtml('reconcile', [{ value: '', label: '全部' }, { value: 'ok', label: '对得上' }, { value: 'mismatch', label: '对不上' }], f.reconcile) + '</div>' +
+      '<div class="filter-field"><label>关键字</label>' + textHtml('keyword', f.keyword, '单号/批次/品名/接收方') + '</div>' +
+      '<div class="filter-hint">出具在放行台账里点「出单」；单据发出后要改只能撤销重出。</div>';
   }
   host.innerHTML = html;
 }
@@ -756,6 +919,69 @@ function openDecisionModal(batch, decision) {
   });
 }
 
+function openIssueDocModal(releaseId, batchCode) {
+  const body =
+    '<div class="field"><label>出具人</label><input type="text" data-field="issuedBy" value=""></div>' +
+    '<div class="field"><label>出具时刻</label><input type="text" data-field="issuedAt" value="" placeholder="留空取当前时刻"><div class="field-hint">格式：2026-09-01 08:00:00</div></div>' +
+    '<div class="field"><label>备注</label><textarea data-field="remark"></textarea></div>' +
+    '<div class="field-hint">按批次 ' + esc(batchCode) + ' 的这条放行记录出具：单据编号自动生成、全库不重号；内容取自台账快照，出具后不可改，要改走撤销重出；同一批次同时只能有一张有效单。</div>';
+  openModal('出具放行单', body, '出具', async function () {
+    const v = formValues();
+    try {
+      await api('POST', '/api/releases/' + encodeURIComponent(releaseId) + '/docs', {
+        issuedBy: v.issuedBy, issuedAt: v.issuedAt, remark: v.remark
+      });
+      closeModal();
+      await refreshAfterMutation();
+    } catch (err) { showError(err); }
+  });
+}
+
+function openSendDocModal(doc) {
+  const body =
+    '<div class="field"><label>接收方</label><input type="text" data-field="sentTo" value="' + esc(doc.sentTo || '') + '"></div>' +
+    '<div class="field"><label>发出时刻</label><input type="text" data-field="sentAt" value="" placeholder="留空取当前时刻"><div class="field-hint">格式：2026-09-01 08:00:00</div></div>' +
+    '<div class="field-hint">单据 ' + esc(doc.docNo) + ' 登记对外发出后状态变「已发出」、回执变「待回执」；此后要改内容只能撤销重出。</div>';
+  openModal('登记发出', body, '登记发出', async function () {
+    const v = formValues();
+    try {
+      await api('POST', '/api/release-docs/' + encodeURIComponent(doc.id) + '/send', { sentTo: v.sentTo, sentAt: v.sentAt });
+      closeModal();
+      await refreshAfterMutation();
+    } catch (err) { showError(err); }
+  });
+}
+
+function openReceiptDocModal(doc) {
+  const body =
+    '<div class="field"><label>回执状态</label><select data-field="receiptStatus"><option value="已回执">已回执</option><option value="对方拒收">对方拒收</option></select></div>' +
+    '<div class="field"><label>回执时刻</label><input type="text" data-field="receiptAt" value="" placeholder="留空取当前时刻"><div class="field-hint">格式：2026-09-01 08:00:00</div></div>' +
+    '<div class="field-hint">单据 ' + esc(doc.docNo) + '（' + esc(doc.sentAt) + ' 发给 ' + esc(doc.sentTo) + '）登记对方回执。</div>';
+  openModal('登记回执', body, '登记回执', async function () {
+    const v = formValues();
+    try {
+      await api('POST', '/api/release-docs/' + encodeURIComponent(doc.id) + '/receipt', { receiptStatus: v.receiptStatus, receiptAt: v.receiptAt });
+      closeModal();
+      await refreshAfterMutation();
+    } catch (err) { showError(err); }
+  });
+}
+
+function openVoidDocModal(doc) {
+  const body =
+    '<div class="field"><label>撤销依据</label><input type="text" data-field="voidReason" value=""></div>' +
+    '<div class="field"><label>经办人</label><input type="text" data-field="voidedBy" value=""></div>' +
+    '<div class="field-hint">单据 ' + esc(doc.docNo) + ' 撤销后留痕、不再参与对账；需要新单时回放行台账，在这条放行记录上重新出具，单号另发。</div>';
+  openModal('撤销放行单', body, '撤销', async function () {
+    const v = formValues();
+    try {
+      await api('POST', '/api/release-docs/' + encodeURIComponent(doc.id) + '/void', { voidReason: v.voidReason, voidedBy: v.voidedBy });
+      closeModal();
+      await refreshAfterMutation();
+    } catch (err) { showError(err); }
+  });
+}
+
 function openRecordForm() {
   const now = state.summary && state.summary.today ? state.summary.today + ' 00:00:00' : '';
   const body =
@@ -824,6 +1050,7 @@ async function refreshAfterMutation() {
 
 function findRoom(id) { return state.rooms.find(function (r) { return r.id === id; }) || null; }
 function findProbe(id) { return state.probes.find(function (p) { return p.id === id; }) || null; }
+function findDoc(id) { return (state.docsView || []).find(function (d) { return d.id === id; }) || null; }
 function findBatch(id) {
   return state.batches.find(function (b) { return b.id === id; }) ||
     (state.batchesView || []).find(function (b) { return b.id === id; }) || null;
@@ -889,6 +1116,15 @@ async function handleAction(action, el) {
       return;
     }
     if (action === 'record-add') { openRecordForm(); return; }
+    if (action === 'doc-issue') { openIssueDocModal(el.dataset.id, el.dataset.code || ''); return; }
+    if (action === 'doc-send') { const d = findDoc(el.dataset.id); if (d) openSendDocModal(d); return; }
+    if (action === 'doc-receipt') { const d = findDoc(el.dataset.id); if (d) openReceiptDocModal(d); return; }
+    if (action === 'doc-void') { const d = findDoc(el.dataset.id); if (d) openVoidDocModal(d); return; }
+    if (action === 'goto-doc') {
+      state.filters.docs.keyword = el.dataset.no || '';
+      await switchView('docs');
+      return;
+    }
     if (action === 'record-del') {
       const id = el.dataset.id;
       armDelete(el, async function () {
@@ -912,6 +1148,12 @@ async function toggleExpand(kind, id) {
     if (kind === 'batch') {
       if (state.expandedBatches.has(id)) { state.expandedBatches.delete(id); renderBatchRows(); }
       else await expandBatch(id);
+      return;
+    }
+    if (kind === 'doc') {
+      if (state.expandedDocs.has(id)) state.expandedDocs.delete(id);
+      else state.expandedDocs.add(id);
+      renderDocRows();
     }
   } catch (err) { showError(err); }
 }

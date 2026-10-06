@@ -210,6 +210,12 @@ button { font-family: inherit; font-size: 13px; }
 .cell-actions { white-space: nowrap; }
 .cell-actions .btn { margin-right: 4px; }
 
+.link-btn {
+  border: none; background: none; padding: 0; cursor: pointer;
+  color: var(--primary-dark); font-size: 12px; text-decoration: underline;
+}
+.link-btn:hover { color: var(--accent); }
+
 .row-danger td { background: var(--accent-soft); }
 .row-danger:hover td { background: #fbdcd8; }
 

@@ -3,6 +3,7 @@ const store = require('./store');
 const { AppError } = require('./errors');
 const res = require('./resources');
 const coldlib = require('./coldlib');
+const docs = require('./docs');
 
 const router = express.Router();
 
@@ -35,6 +36,7 @@ function overview(data) {
   const noRecordBatches = data.batches.filter((b) => !data.records.some((r) => r.batchId === b.id)).length;
   const expiredProbes = data.probes.filter((p) => !coldlib.probeValidOn(p, store.nowText().slice(0, 10))).length;
   const mktValues = decorated.map((d) => d.check.mkt).filter((v) => v > 0);
+  const docCounts = docs.summaryCounts(data);
   return {
     today: store.nowText().slice(0, 10),
     roomCount: data.rooms.length,
@@ -50,6 +52,15 @@ function overview(data) {
     releaseCount: data.releases.length,
     releasedCount: data.releases.filter((r) => r.decision === '放行').length,
     rejectedCount: data.releases.filter((r) => r.decision === '拒收').length,
+    releaseDocCount: docCounts.releaseDocCount,
+    validDocCount: docCounts.validDocCount,
+    issuedDocCount: docCounts.issuedDocCount,
+    sentDocCount: docCounts.sentDocCount,
+    voidedDocCount: docCounts.voidedDocCount,
+    pendingReceiptCount: docCounts.pendingReceiptCount,
+    receivedDocCount: docCounts.receivedDocCount,
+    rejectedReceiptCount: docCounts.rejectedReceiptCount,
+    docMismatchCount: docCounts.docMismatchCount,
     readyToRelease,
     blockedCount,
     noRecordBatches,
@@ -112,6 +123,13 @@ router.post('/records', withData((data, req) => ({ __save: true, __body: res.cre
 router.delete('/records/:id', withData((data, req) => ({ __save: true, __body: res.removeRecord(data, req.params.id) })));
 
 router.get('/releases', withData((data, req) => res.listReleases(data, req.query)));
+router.post('/releases/:id/docs', withData((data, req) => ({ __save: true, __body: docs.issueDoc(data, req.params.id, req.body || {}) })));
+
+router.get('/release-docs', withData((data, req) => docs.listDocs(data, req.query)));
+router.get('/release-docs/:id', withData((data, req) => docs.docDetail(data, req.params.id)));
+router.post('/release-docs/:id/send', withData((data, req) => ({ __save: true, __body: docs.sendDoc(data, req.params.id, req.body || {}) })));
+router.post('/release-docs/:id/receipt', withData((data, req) => ({ __save: true, __body: docs.receiptDoc(data, req.params.id, req.body || {}) })));
+router.post('/release-docs/:id/void', withData((data, req) => ({ __save: true, __body: docs.voidDoc(data, req.params.id, req.body || {}) })));
 
 router.use((req, r, next) => next(new AppError(404, 'NOT_FOUND', '这个地址没有对应功能：' + req.method + ' ' + req.originalUrl)));
 
