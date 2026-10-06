@@ -1,6 +1,7 @@
 const { AppError } = require('./errors');
 const store = require('./store');
 const coldlib = require('./coldlib');
+const certs = require('./certificates');
 
 const ROOM_STATUS = ['运行', '检修', '停用'];
 const ROOM_TYPE = ['冷藏库', '冷藏车', '冷冻库'];
@@ -46,6 +47,7 @@ function decorateBatch(data, batch) {
   const stats = coldlib.excursionStats(data, batch.id);
   const check = coldlib.releaseCheck(data, batch);
   const releases = data.releases.filter((r) => r.batchId === batch.id);
+  const activeCert = certs.activeCertificateOfBatch(data, batch.id);
   return Object.assign({}, batch, {
     roomCode: roomCode(data, batch.roomId),
     recordCount: stats.recordCount,
@@ -57,6 +59,9 @@ function decorateBatch(data, batch) {
     releaseCheck: check,
     releaseCount: releases.length,
     lastDecision: releases.length ? releases[releases.length - 1].decision : '',
+    certCount: data.releaseCertificates.filter((c) => c.batchId === batch.id).length,
+    activeCertNo: activeCert ? activeCert.certNo : '',
+    certStatus: activeCert ? activeCert.status : '',
   });
 }
 
@@ -211,7 +216,9 @@ function batchDetail(data, id) {
     effectiveRecords: coldlib.effectiveRecords(data, id).map((r) => Object.assign({}, r, { probeCode: probeCode(data, r.probeId) })),
     segments: coldlib.excursionStats(data, id).segments,
     chainGaps: coldlib.chainGaps(data, id).gaps,
-    releases: data.releases.filter((r) => r.batchId === id).slice().sort((a, b) => (a.decidedAt < b.decidedAt ? 1 : -1)),
+    releases: data.releases.filter((r) => r.batchId === id).slice().sort((a, b) => (a.decidedAt < b.decidedAt ? 1 : -1))
+      .map((r) => Object.assign({}, r, { certificate: certs.certificatesOfRelease(data, r.id) })),
+    certificates: certs.listCertificates(data, { batchId: id }),
   });
 }
 
@@ -269,8 +276,11 @@ function removeBatch(data, id) {
   if (!batch) throw new AppError(404, 'BATCH_NOT_FOUND', '这个批次不存在');
   if (batch.status === '已放行') throw new AppError(409, 'BATCH_RELEASED', '这个批次已经放行，不能直接删除', { code: batch.code });
   const used = data.records.filter((r) => r.batchId === id).length;
+  const liveCert = data.releaseCertificates.find((c) => c.batchId === id && c.status !== '已撤销');
+  if (liveCert) throw new AppError(409, 'CERT_ACTIVE', '这个批次名下还有放行单 ' + liveCert.certNo + '，要先撤销单据才能删除', { certNo: liveCert.certNo });
   data.records = data.records.filter((r) => r.batchId !== id);
   data.releases = data.releases.filter((r) => r.batchId !== id);
+  data.releaseCertificates = data.releaseCertificates.filter((c) => c.batchId !== id);
   data.batches = data.batches.filter((b) => b.id !== id);
   return { removed: id, removedRecords: used };
 }
@@ -333,9 +343,25 @@ function listReleases(data, query) {
   let rows = data.releases.slice();
   if (q.batchId) rows = rows.filter((r) => r.batchId === q.batchId);
   if (q.decision) rows = rows.filter((r) => r.decision === q.decision);
-  return rows
-    .map((r) => Object.assign({}, r, { batchCode: batchCode(data, r.batchId) }))
+  const decorated = rows
+    .map((r) => Object.assign({}, r, {
+      batchCode: batchCode(data, r.batchId),
+      releaseActive: certs.isActiveRelease(data, r.id),
+      certificate: certs.certificatesOfRelease(data, r.id),
+    }))
     .sort((a, b) => (a.decidedAt < b.decidedAt ? 1 : -1));
+  // 单据与回执状态在台账里筛出来
+  if (q.certStatus === '无') return decorated.filter((r) => r.certificate.certCount === 0);
+  if (q.certStatus) return decorated.filter((r) => r.certificate.certStatus === q.certStatus);
+  if (q.receiptStatus === '待回执') {
+    return decorated.filter((r) => r.certificate.active && r.certificate.active.status === '已发出'
+      && (!r.certificate.active.receipt || r.certificate.active.receipt.status === '待回执'));
+  }
+  if (q.receiptStatus) return decorated.filter((r) => r.certificate.receiptStatus === q.receiptStatus);
+  if (q.inconsistent === '1' || q.inconsistent === 'true') {
+    return decorated.filter((r) => r.certificate.active && !r.certificate.active.consistent);
+  }
+  return decorated;
 }
 
 // 放行：登记放行单并改批次状态

@@ -3,6 +3,7 @@ const store = require('./store');
 const { AppError } = require('./errors');
 const res = require('./resources');
 const coldlib = require('./coldlib');
+const certs = require('./certificates');
 
 const router = express.Router();
 
@@ -50,6 +51,16 @@ function overview(data) {
     releaseCount: data.releases.length,
     releasedCount: data.releases.filter((r) => r.decision === '放行').length,
     rejectedCount: data.releases.filter((r) => r.decision === '拒收').length,
+    certCount: data.releaseCertificates.length,
+    certActiveCount: data.releaseCertificates.filter((c) => c.status !== '已撤销').length,
+    certRevokedCount: data.releaseCertificates.filter((c) => c.status === '已撤销').length,
+    certIssuedCount: data.releaseCertificates.filter((c) => c.status === '已出具').length,
+    certSentCount: data.releaseCertificates.filter((c) => c.status === '已发出').length,
+    certReceiptDoneCount: data.releaseCertificates.filter((c) => c.receipt && c.receipt.status !== '待回执').length,
+    certAckPendingCount: data.releaseCertificates.filter((c) => c.status === '已发出' && (!c.receipt || c.receipt.status === '待回执')).length,
+    certInconsistentCount: data.releaseCertificates
+      .map((c) => certs.decorateCertificate(data, c, false))
+      .filter((c) => !c.consistent).length,
     readyToRelease,
     blockedCount,
     noRecordBatches,
@@ -112,6 +123,20 @@ router.post('/records', withData((data, req) => ({ __save: true, __body: res.cre
 router.delete('/records/:id', withData((data, req) => ({ __save: true, __body: res.removeRecord(data, req.params.id) })));
 
 router.get('/releases', withData((data, req) => res.listReleases(data, req.query)));
+
+// 放行单
+router.get('/certificates', withData((data, req) => certs.listCertificates(data, req.query)));
+router.post('/certificates', withData((data, req) => ({ __save: true, __body: certs.issueCertificate(data, req.body || {}) })));
+router.get('/certificates/reconcile', withData((data, req) => certs.reconcileAll(data, req.query)));
+router.get('/certificates/:id', withData((data, req) => certs.certificateDetail(data, req.params.id)));
+router.post('/certificates/:id/send', withData((data, req) => ({ __save: true, __body: certs.sendCertificate(data, req.params.id, req.body || {}) })));
+router.post('/certificates/:id/receipt', withData((data, req) => ({ __save: true, __body: certs.receiptCertificate(data, req.params.id, req.body || {}) })));
+router.post('/certificates/:id/revoke', withData((data, req) => ({ __save: true, __body: certs.revokeCertificate(data, req.params.id, req.body || {}) })));
+router.get('/certificates/:id/reconcile', withData((data, req) => {
+  const cert = data.releaseCertificates.find((c) => c.id === req.params.id || c.certNo === req.params.id);
+  if (!cert) throw new AppError(404, 'CERT_NOT_FOUND', '这张放行单不存在');
+  return certs.decorateCertificate(data, cert, true).reconcile;
+}));
 
 router.use((req, r, next) => next(new AppError(404, 'NOT_FOUND', '这个地址没有对应功能：' + req.method + ' ' + req.originalUrl)));
 
